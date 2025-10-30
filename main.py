@@ -1,13 +1,14 @@
-# === SmartSki HUD Shared API (FastAPI + SQLite3) ===
+# === Squad Ski API v1 ===
+# Minimal FastAPI backend with user_id, name, and active status
 # Author: Niko Warren 2025
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-import sqlite3, time
+import sqlite3, time, uuid
 
-app = FastAPI(title="SmartSki HUD API")
+app = FastAPI(title="Squad Ski API v1")
 
-DB = "ski_hud.db"
+DB = "squad_ski.db"
 
 # ---------- DB SETUP ----------
 def db_connect():
@@ -19,14 +20,10 @@ def init_db():
     conn = db_connect()
     cur = conn.cursor()
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS active_users (
-            username TEXT PRIMARY KEY,
-            lat REAL,
-            lon REAL,
-            speed REAL,
-            max_speed REAL,
-            g_force REAL,
-            max_g REAL,
+        CREATE TABLE IF NOT EXISTS users (
+            user_id TEXT PRIMARY KEY,
+            name TEXT,
+            active INTEGER,
             updated REAL
         )
     """)
@@ -36,63 +33,75 @@ def init_db():
 
 init_db()
 
-
 # ---------- ROUTES ----------
+
 @app.get("/")
 def index():
-    return {"status": "🏔️ SmartSki HUD API online", "routes": ["/update", "/get_all", "/records"]}
+    return {"status": "✅ Squad Ski API online", "routes": ["/register", "/update", "/active"]}
+
+
+@app.post("/register")
+async def register(request: Request):
+    """
+    Registers a new user. Auto-generates a UUID if not provided.
+    Example:
+    {"name": "Niko"} → returns {"user_id": "...", "name": "Niko"}
+    """
+    data = await request.json()
+    name = data.get("name", "anon")
+    user_id = str(uuid.uuid4())
+
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO users (user_id, name, active, updated) VALUES (?, ?, ?, ?)",
+                (user_id, name, 1, time.time()))
+    conn.commit()
+    conn.close()
+
+    return {"user_id": user_id, "name": name, "active": True}
 
 
 @app.post("/update")
 async def update(request: Request):
+    """
+    Update a user's active status.
+    Example: {"user_id": "...", "active": false}
+    """
     data = await request.json()
-    user = data.get("user", "anon").lower()
-    lat, lon = data.get("lat", 0.0), data.get("lon", 0.0)
-    speed, g = float(data.get("speed", 0.0)), float(data.get("g", 0.0))
+    user_id = data.get("user_id")
+    active = bool(data.get("active", True))
 
     conn = db_connect()
     cur = conn.cursor()
-    row = cur.execute("SELECT * FROM active_users WHERE username=?", (user,)).fetchone()
-
-    if row:
-        max_speed = max(row["max_speed"], speed)
-        max_g = max(row["max_g"], g)
-        cur.execute("""
-            UPDATE active_users
-            SET lat=?, lon=?, speed=?, g_force=?, max_speed=?, max_g=?, updated=?
-            WHERE username=?
-        """, (lat, lon, speed, g, max_speed, max_g, time.time(), user))
-    else:
-        cur.execute("""
-            INSERT INTO active_users(username, lat, lon, speed, max_speed, g_force, max_g, updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (user, lat, lon, speed, speed, g, g, time.time()))
-
+    cur.execute("UPDATE users SET active=?, updated=? WHERE user_id=?",
+                (1 if active else 0, time.time(), user_id))
     conn.commit()
     conn.close()
-    return JSONResponse({"status": "ok", "user": user})
+
+    return {"status": "updated", "user_id": user_id, "active": active}
 
 
-@app.get("/get_all")
-def get_all():
+@app.get("/active")
+def get_active():
+    """
+    Returns all users currently active in the last 60 seconds.
+    """
     conn = db_connect()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM active_users WHERE updated > ?", (time.time() - 60,))
+    cur.execute("SELECT * FROM users WHERE active=1 AND updated > ?", (time.time() - 60,))
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows
 
 
-@app.get("/records")
-def records():
+@app.get("/all")
+def get_all():
+    """
+    Returns all users regardless of active status.
+    """
     conn = db_connect()
     cur = conn.cursor()
-    cur.execute("""
-        SELECT username, max_speed, max_g
-        FROM active_users
-        ORDER BY max_speed DESC
-        LIMIT 5
-    """)
+    cur.execute("SELECT * FROM users")
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows
@@ -100,9 +109,12 @@ def records():
 
 @app.get("/reset")
 def reset():
+    """
+    Deletes all users (for dev use only)
+    """
     conn = db_connect()
     cur = conn.cursor()
-    cur.execute("DELETE FROM active_users")
+    cur.execute("DELETE FROM users")
     conn.commit()
     conn.close()
     return {"status": "database cleared"}
